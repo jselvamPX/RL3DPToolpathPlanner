@@ -1508,7 +1508,8 @@ def find_most_similar_checkpoint(current_adj_matrix, checkpoint_dir="checkpoint"
     for filename in os.listdir(checkpoint_dir):
         if filename.endswith(".pt"):
             filepath = os.path.join(checkpoint_dir, filename)
-            checkpoint = torch.load(filepath, map_location=torch.device('cpu'))
+            # Set weights_only=False to handle the PyTorch 2.6 change
+            checkpoint = torch.load(filepath, map_location=torch.device('cpu'), weights_only=False)
             adj_matrix = checkpoint['adj_matrix']
 
             if adj_matrix.shape != normalized_matrix.shape:
@@ -1732,4 +1733,377 @@ def beam_fea_calculate(g_num, g_coord, total_force_new, boundary_nodes_array_fea
             max_deformation_length = deformation_length
 
     return max_deformation_length
+                (
+                    key
+                    for key, value in existing_coordinates_.items()
+                    if all(abs(a - b) <= 0.01 for a, b in zip(value, min_z_coords))
+                ),
+                None,
+            )
+            if corresponding_node is not None:
+                beam_seq_[0][0].append(corresponding_node)
 
+    best_path = extract_best_path(best_path_file)
+    node_coordinates = extract_coordinates(node_coordinates_file)
+    second_node_coordinates = extract_coordinates(second_node_coordinates_file)
+    beam_seq = compare_coordinates(best_path, node_coordinates, existing_coordinates)
+    add_min_z_coordinate_node(beam_seq, second_node_coordinates, existing_coordinates)
+
+    return beam_seq
+
+
+def calculate_total_max_deformation(node_file, path_file):
+    def read_coordinates(filename):
+        coordinates_ = {}
+        with open(filename, "r") as file:
+            for index, line in enumerate(file):
+                x, y, z = map(float, line.split())
+                coordinates_[index] = [x, y, z]
+        return coordinates_
+
+    def read_path(filename):
+        path_ = []
+        with open(filename, "r") as file:
+            for line in file:
+                if line.startswith("Best path:"):
+                    path_ = line.split(":")[1].strip().strip("[]").split(", ")
+                    path_ = list(map(int, path_))
+                    break
+        return [(path_[i], path_[i + 1]) for i in range(len(path_) - 1)]
+
+    coordinates = read_coordinates(node_file)
+    path = read_path(path_file)
+
+    boundary_nodes_array = np.array(
+        [index for index, coord in coordinates.items() if coord[2] < 1]
+    )
+    lines = []
+    max_deformation = 0
+    lines_max_deformation = []
+    index = 0
+    max_index = 0
+    for edge in path:
+        if edge not in lines:
+            lines.append(edge)
+            current_lines = np.array(lines)
+            current_deformation = beam_fea_graph(
+                current_lines, coordinates, boundary_nodes_array, draw=False
+            )
+
+            if current_deformation > max_deformation:
+                max_deformation = current_deformation
+                lines_max_deformation = list(lines)
+                max_index = index
+
+        index += 1
+
+    lines_max_deformation_array = np.array(lines_max_deformation)
+    beam_fea_graph(
+        lines_max_deformation_array, coordinates, boundary_nodes_array, draw=False
+    )
+
+    return max_deformation, max_index
+
+
+def save_average_to_file(return_list, env_name, savept):
+    average = round(sum(return_list[:100]) / 100, 3)
+    file_suffix = "P" if savept else "I"
+    file_name = f"checkpoint/100_average_{env_name}_{file_suffix}.txt"
+
+    with open(file_name, "a") as file:
+        file.write(f"{average}\n")
+
+
+def update_progress(beam_seq, total_nodes, bar_length=50):
+    unique_nodes = len(set(node for path in beam_seq for node in path[0]))
+
+    progress = unique_nodes / total_nodes
+    arrow = (
+        int(round(progress * bar_length - 1))
+        if unique_nodes != total_nodes
+        else bar_length
+    )
+    spaces = bar_length - arrow
+    progress_bar = "Progress: [{0}{1}] {2}%".format(
+        ">" * arrow, " " * spaces, round(progress * 100, 2)
+    )
+
+    sys.stdout.write("\r" + progress_bar)
+    sys.stdout.flush()
+
+
+def update_progress_post(ii, total, bar_length=50):
+    """Update the progress bar based on the iteration index and total length."""
+    progress = ii / total
+
+    arrow = int(round(progress * bar_length - 1)) if ii < total else bar_length
+    spaces = bar_length - arrow
+
+    progress_bar = "Progress: [{0}{1}] {2}%".format(
+        ">" * arrow, " " * spaces, round(progress * 100, 2)
+    )
+
+    sys.stdout.write("\r" + progress_bar)
+    sys.stdout.flush()
+
+
+def final_progress(bar_length=50):
+    """Function to display the progress bar at 100% completion and then move to a new line."""
+    progress_bar = "Progress: [{0}] {1}%".format(">" * bar_length, 100.0)
+    print("\r" + progress_bar)
+
+
+def find_most_similar_checkpoint(current_adj_matrix, checkpoint_dir="checkpoint"):
+    max_similarity = -1
+    most_similar_checkpoint_path = None
+    normalized_matrix = normalize_matrix(current_adj_matrix)
+
+    for filename in os.listdir(checkpoint_dir):
+        if filename.endswith(".pt"):
+            filepath = os.path.join(checkpoint_dir, filename)
+            checkpoint = torch.load(
+                filepath, map_location=torch.device("cpu"), weights_only=False
+            )
+            adj_matrix = checkpoint["adj_matrix"]
+
+            if adj_matrix.shape != normalized_matrix.shape:
+                larger_shape = tuple(
+                    max(s1, s2)
+                    for s1, s2 in zip(adj_matrix.shape, normalized_matrix.shape)
+                )
+                adj_matrix = adjust_and_pad_matrix(adj_matrix, larger_shape)
+                normalized_matrix = adjust_and_pad_matrix(
+                    normalized_matrix, larger_shape
+                )
+
+            similarity = calculate_similarity(normalized_matrix, adj_matrix)
+
+            if similarity > max_similarity:
+                max_similarity = similarity
+                most_similar_checkpoint_path = filepath
+
+    return most_similar_checkpoint_path, max_similarity
+
+
+def normalize_matrix(matrix):
+    max_val = matrix.max()
+    if max_val > 0:
+        normalized_matrix = matrix / max_val
+    else:
+        normalized_matrix = matrix
+    return normalized_matrix
+
+
+def calculate_similarity(matrix_a, matrix_b):
+    if not isinstance(matrix_a, torch.Tensor):
+        matrix_a = torch.tensor(matrix_a, dtype=torch.float32)
+    if not isinstance(matrix_b, torch.Tensor):
+        matrix_b = torch.tensor(matrix_b, dtype=torch.float32)
+
+    diff = torch.norm(matrix_a - matrix_b, p="fro") * 0.2
+    similarity = 1 / (1 + diff)
+    return similarity.item()
+
+
+def adjust_and_pad_matrix(matrix, target_shape):
+    padding = [(0, max(0, t - c)) for t, c in zip(target_shape, matrix.shape)]
+
+    if isinstance(matrix, np.ndarray):
+        return np.pad(matrix, padding, mode="constant", constant_values=0)
+    elif isinstance(matrix, torch.Tensor):
+        pad = (0, padding[2][1], 0, padding[1][1], 0, padding[0][1])
+        return torch.nn.functional.pad(matrix, pad, "constant", 0)
+    else:
+        raise TypeError(
+            "Unsupported type. The input must be either a numpy array or a torch tensor."
+        )
+
+
+def extract_faces_from_obj(env_name):
+    file_name = f"data/{env_name}.obj"
+    faces = []
+    try:
+        with open(file_name, "r") as file:
+            for line in file:
+                if line.startswith("f "):
+                    face_indices = line.strip().split()[1:]
+                    face_indices = [int(index) - 1 for index in face_indices]
+                    faces.append(face_indices)
+
+        faces_np = np.array(faces, dtype=int)
+        return faces_np
+    except FileNotFoundError:
+        print(f"file {file_name} not found。")
+        return None
+    except Exception as e:
+        print(f"read eroor：{e}")
+        return None
+
+
+def pad_matrix(matrix, target_dim):
+    current_depth, current_height, current_width = matrix.shape
+    padding_height = max(0, target_dim - current_height)
+    padding_width = max(0, target_dim - current_width)
+    new_height = current_height + padding_height
+    new_width = current_width + padding_width
+    new_shape = (current_depth, new_height, new_width)
+    padded_matrix = np.zeros(new_shape, dtype=matrix.dtype)
+    padded_matrix[:, :current_height, :current_width] = matrix
+    return padded_matrix
+
+
+def compute_edges_length(V, Edge):
+    diff = V[Edge[:, 1], :] - V[Edge[:, 0], :]
+    return np.sqrt(np.sum(diff**2, axis=1))
+
+
+def beam_fea_calculate(
+    g_num, g_coord, total_force_new, boundary_nodes_array_fea, draw, index=0
+):
+    E = 2636
+    rho = 1250
+    A = 3.14e-6
+    G = 1419
+    r = 0.001
+
+    G = G * 2.22
+    E = E + 700
+
+    V = g_coord * 0.001
+    Edge = g_num
+
+    le = compute_edges_length(V, Edge)
+
+    F = np.zeros(6 * V.shape[0])
+    for force in total_force_new:
+        F[int(force[0]) * 6 + 2] = force[-1]
+    F = F * 0.001
+
+    Iz = np.pi * r**4 / 4
+    Iy = np.pi * r**4 / 4
+    J = np.pi * r**4 / 2
+
+    K = np.zeros((6 * V.shape[0], 6 * V.shape[0]))
+    for i in range(Edge.shape[0]):
+        v1 = Edge[i, 0]
+        v2 = Edge[i, 1]
+        DOF = np.hstack(
+            (np.arange(6 * v1, 6 * (v1 + 1)), np.arange(6 * v2, 6 * (v2 + 1)))
+        )
+        kk = np.zeros((12, 12))
+
+        kk[0, 0] = E * A / le[i]
+        kk[6, 0] = -kk[0, 0]
+        kk[0, 6] = -E * A / le[i]
+        kk[6, 6] = -kk[0, 6]
+        kk[1, 1] = 12 * E * Iz / le[i] ** 3
+        kk[7, 1] = -kk[1, 1]
+        kk[1, 5] = 6 * E * Iz / le[i] ** 2
+        kk[7, 5] = -kk[1, 5]
+        kk[1, 7] = -12 * E * Iz / le[i] ** 3
+        kk[7, 7] = -kk[1, 7]
+        kk[1, 11] = 6 * E * Iz / le[i] ** 2
+        kk[7, 11] = -kk[1, 11]
+        kk[2, 2] = 12 * E * Iy / le[i] ** 3
+        kk[8, 2] = -kk[2, 2]
+        kk[2, 4] = -6 * E * Iy / le[i] ** 2
+        kk[8, 4] = -kk[2, 4]
+        kk[2, 8] = -12 * E * Iy / le[i] ** 3
+        kk[8, 8] = -kk[2, 8]
+        kk[2, 10] = -6 * E * Iy / le[i] ** 2
+        kk[8, 10] = -kk[2, 10]
+        kk[3, 3] = G * J / le[i]
+        kk[9, 3] = -kk[3, 3]
+        kk[3, 9] = -G * J / le[i]
+        kk[9, 9] = -kk[3, 9]
+        kk[4, 2] = -6 * E * Iy / le[i] ** 2
+        kk[10, 2] = kk[4, 2]
+        kk[4, 4] = 4 * E * Iy / le[i]
+        kk[10, 4] = 2 * E * Iy / le[i]
+        kk[4, 8] = 6 * E * Iy / le[i] ** 2
+        kk[10, 8] = kk[4, 8]
+        kk[4, 10] = 2 * E * Iy / le[i]
+        kk[10, 10] = 4 * E * Iy / le[i]
+        kk[5, 1] = 6 * E * Iz / le[i] ** 2
+        kk[11, 1] = kk[5, 1]
+        kk[5, 5] = 4 * E * Iz / le[i]
+        kk[11, 5] = 2 * E * Iz / le[i]
+        kk[5, 7] = -6 * E * Iz / le[i] ** 2
+        kk[11, 7] = kk[5, 7]
+        kk[5, 11] = 2 * E * Iz / le[i]
+        kk[11, 11] = 4 * E * Iz / le[i]
+
+        l = (V[v2, 0] - V[v1, 0]) / le[i]
+        m = (V[v2, 1] - V[v1, 1]) / le[i]
+        n = (V[v2, 2] - V[v1, 2]) / le[i]
+        D = np.sqrt(l**2 + m**2)
+
+        if D == 0:
+            if n > 0:
+                R = np.array([[0, 0, 1], [0, 1, 0], [-1, 0, 0]])
+            else:
+                R = np.array([[0, 0, -1], [0, 1, 0], [1, 0, 0]])
+        else:
+            R = np.array([[l, m, n], [-m / D, l / D, 0], [-l * n / D, -m * n / D, D]])
+
+        RR = np.zeros((12, 12))
+        RR[:3, :3] = R
+        RR[3:6, 3:6] = R
+        RR[6:9, 6:9] = R
+        RR[9:, 9:] = R
+
+        K[np.ix_(DOF, DOF)] += RR.T @ kk @ RR
+
+    U = np.zeros(6 * V.shape[0])
+    fixed_node = boundary_nodes_array_fea
+    fixed_free_dof = np.unique(
+        np.hstack([np.arange(6 * node, 6 * (node + 1)) for node in fixed_node])
+    )
+    all_free_dof = np.arange(6 * V.shape[0])
+    free_dof = np.setdiff1d(all_free_dof, fixed_free_dof)
+    U[free_dof] = np.linalg.solve(K[np.ix_(free_dof, free_dof)], F[free_dof])
+    U = U.reshape(-1, 6)
+    s = U[:, :3]
+    VV = V + s
+
+    if draw:
+        distances = np.linalg.norm(V - VV, axis=1)
+
+        color_factor = 100 * distances / 8
+        color_factor = np.clip(color_factor, 0, 1)
+
+        fig = plt.figure(dpi=500)
+        ax = fig.add_subplot(111, projection="3d")
+
+        for i in range(Edge.shape[0]):
+            ax.plot(*V[Edge[i, :], :].T, color="grey", linewidth=1.4, alpha=0.9)
+
+        for i in range(V.shape[0]):
+            ax.scatter(*V[i], color="grey", s=2, alpha=0.9)
+
+        ax.axis("off")
+
+        output_dir = "FEA_simu/ori"
+        if not os.path.exists(output_dir):
+            os.makedirs(output_dir)
+
+        file_name = f"{output_dir}/plot_{index}.png"
+
+        elev = 30
+        azim = 0
+        ax.view_init(elev=elev, azim=azim)
+
+        ax.set_xlim([0, 0.1])
+        ax.set_ylim([0, 0.1])
+        ax.set_zlim([0, 0.1])
+        plt.savefig(file_name)
+
+        plt.clf()
+
+    max_deformation_length = 0
+    for i in range(VV.shape[0]):
+        deformation_length = np.linalg.norm(V[i] - VV[i]) * 100
+        if deformation_length > max_deformation_length:
+            max_deformation_length = deformation_length
+
+    return max_deformation_length
