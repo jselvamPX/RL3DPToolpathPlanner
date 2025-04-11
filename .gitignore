@@ -4,6 +4,8 @@ old_ckpts/
 
 # Data files
 data/
+outputs/
+results/
 
 # Figures
 figure/
