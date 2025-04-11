@@ -1,0 +1,31 @@
+# Checkpoints
+checkpoint/
+old_ckpts/
+
+# Data files
+data/
+
+# Figures
+figure/
+
+# Python cache files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Jupyter Notebook
+.ipynb_checkpoints/
+
+# Distribution / packaging
+dist/
+build/
+*.egg-info/
+
+# Virtual environments
+venv/
+env/
+ENV/
+
+# OS specific files
+.DS_Store
+Thumbs.db
